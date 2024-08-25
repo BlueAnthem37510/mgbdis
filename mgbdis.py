@@ -13,6 +13,7 @@ import glob
 import hashlib
 import os
 import png
+from multiprocessing import Pool
 from shutil import copyfile
 
 from instruction_set import instructions, cb_instructions, instruction_variants
@@ -231,7 +232,10 @@ class Bank:
             'code': self.process_code_in_range,
             'data': self.process_data_in_range,
             'text': self.process_text_in_range,
-            'image': self.process_image_in_range
+            'image': self.process_image_in_range,
+            'bin' : self.process_binary_in_range,
+            'jump' : self.process_jump_table
+          
         })
 
 
@@ -354,13 +358,13 @@ class Bank:
 
         return labels
 
-
     def format_label(self, instruction_name, address):
         formatted_bank = format_hex(f'{self.bank_number:03x}')
         formatted_address = format_hex(f'{address:04x}')
         return f'{self.instruction_label_prefixes[instruction_name]}_{formatted_bank}_{formatted_address}'                
 
-
+    def format_binary_label(self, address):
+        return 'binary_{0:03x}_{1:04x}'.format(self.bank_number, address)
     def format_image_label(self, address):
         return 'image_{0:03x}_{1:04x}'.format(self.bank_number, address)
 
@@ -713,6 +717,18 @@ class Bank:
 
         if len(values):
             self.append_output(self.format_data(values))
+    def process_binary_in_range(self, rom, start_address, end_address, arguments = None):
+        if self.first_pass:
+            return
+        mem_address = rom_address_to_mem_address(start_address)
+        labels = self.get_labels_for_non_code_address(mem_address)
+        if len(labels):
+            self.append_labels_to_output(labels)
+            basename = labels[0].rstrip(':')
+        else:
+            basename = self.format_binary_label(mem_address)
+        full_filename = rom.write_binary(basename, arguments, rom.data[start_address:end_address])
+        self.append_output(self.format_instruction('INCBIN', ['\"' + os.path.normpath(full_filename).replace("\\", "/") + '\"']))
     def process_image_in_range(self, rom, start_address, end_address, arguments = None):
         if not self.first_pass and debug:
             print('Outputting image in range: {} - {}'.format(hex_word(start_address), hex_word(end_address)))
@@ -730,7 +746,19 @@ class Bank:
 
         full_filename = rom.write_image(basename, arguments, rom.data[start_address:end_address])
         self.append_output(self.format_instruction('INCBIN', ['\"' + full_filename + '\"']))
-
+    def process_jump_table(self, rom, start_address, end_address, arguments = None):
+        if self.first_pass:
+            return
+        address = (rom.data[start_address+1] << 8) | rom.data[start_address]
+        mem_address = rom_address_to_mem_address(address)
+        labels = self.get_labels_for_address(mem_address)
+        output = "\tjump_table {}"
+        if len(labels) > 0 and labels[0][:3] != "jr_":
+            output = output.format(labels[0].replace(":", ""))           
+        else:
+            output = output.format(hex_word(address))
+        self.append_output(output)
+       
 
 
 
@@ -779,7 +807,10 @@ class Symbols:
 
                 elif block_type in ['.image']:
                     block_type = 'image'
-
+                elif block_type in ['.jump']:
+                    block_type = 'jump'
+                elif block_type in ['.bin']:
+                    block_type = 'bin'
                 else:
                     return
 
@@ -1009,8 +1040,9 @@ class ROM:
         f = open(path, 'w', encoding="utf-8")
 
         self.write_header(f)
-
+        f.write("MACRO jump_table\n\tdb low(\\1)\n\tdb high(\\1)\nENDM\n")
         f.write('INCLUDE "hardware.inc"')
+    
         character_maps = self.get_character_map_paths()
         if(len(character_maps) > 0):
             for map in character_maps:
@@ -1020,7 +1052,20 @@ class ROM:
             f.write('\nINCLUDE "bank_{0:03x}.asm"'.format(bank))
         f.close()
 
+    def write_binary(self, basename, arguments, data):
+        basename += ".bin"
+        if arguments is None:
+            path  = "binary"
+        else:
+            path  = arguments
+        output_path = os.path.join(self.output_directory, path) 
+        if not os.path.exists(output_path):
+            os.mkdir(output_path)
+              
+        with open(os.path.join(output_path, basename), "wb+") as f:
+            f.write(data)
 
+        return  os.path.join(path, basename) #relative path
     def write_image(self, basename, arguments, data):
 
         # defaults
@@ -1161,11 +1206,7 @@ class ROM:
         else:
             f.write('game.o: game.asm bank_*.asm\n')
 
-        parameters = ['--preserve-ld']
-        if self.style['disable_halt_nops']:
-            parameters.append('--halt-without-nop')
-        else:
-            parameters.append('--nop-after-halt')
+        parameters = [""]
         f.write('\trgbasm {} -o game.o game.asm\n\n'.format(' '.join(parameters)))
 
         f.write('game.{}: game.o\n'.format(rom_extension))
@@ -1243,9 +1284,11 @@ style = {
     'ld_c': args.ld_c,
     'disable_halt_nops': args.disable_halt_nops,
 }
-instructions = apply_style_to_instructions(style, instructions)
-charMap = []
-if args.character_map_path is not None:
-    charMap = CharacterMap.create_character_maps(args.character_map_path)
-rom = ROM(args.rom_path, style, args.tiny, charMap)
-rom.disassemble(args.output_dir)
+if __name__ == '__main__':
+    
+    instructions = apply_style_to_instructions(style, instructions)
+    charMap = []
+    if args.character_map_path is not None:
+        charMap = CharacterMap.create_character_maps(args.character_map_path)
+    rom = ROM(args.rom_path, style, args.tiny, charMap)
+    rom.disassemble(args.output_dir)
