@@ -208,6 +208,7 @@ class Bank:
         self.symbols = symbols
         self.size = size
         self.bank0 = bank0
+        self.empty = None
 
         if number == 0:
             self.memory_base_address = 0
@@ -234,7 +235,7 @@ class Bank:
             'text': self.process_text_in_range,
             'image': self.process_image_in_range,
             'bin' : self.process_binary_in_range,
-            'jump' : self.process_jump_table
+            'jump' : self.process_jump_address
           
         })
 
@@ -746,19 +747,33 @@ class Bank:
 
         full_filename = rom.write_image(basename, arguments, rom.data[start_address:end_address])
         self.append_output(self.format_instruction('INCBIN', ['\"' + full_filename + '\"']))
-    def process_jump_table(self, rom, start_address, end_address, arguments = None):
+    def process_jump_address(self, rom, start_address, end_address, arguments = None):
         if self.first_pass:
             return
         address = (rom.data[start_address+1] << 8) | rom.data[start_address]
         mem_address = rom_address_to_mem_address(address)
         labels = self.get_labels_for_address(mem_address)
-        output = "\tjump_table {}"
+        output = "\tjump_address {}"
         if len(labels) > 0 and labels[0][:3] != "jr_":
             output = output.format(labels[0].replace(":", ""))           
         else:
             output = output.format(hex_word(address))
         self.append_output(output)
        
+    def is_empty(self, rom ):
+        if self.empty != None: return self.empty
+        address = self.bank_number*self.size
+        end = (self.bank_number+1)*self.size
+        #check all are 0
+        while(address < end):
+
+            if(rom.data[address] != 0):
+                self.empty = False
+                return False
+            address += 1
+        self.empty = True
+        return True
+
 
 
 
@@ -1007,7 +1022,8 @@ class ROM:
         if not debug:
             # progress indicator
             print('.', end='', flush=True)
-
+        if(self.style["ignore_empty_banks"] and self.banks[bank].is_empty(self)):
+            return
         path = os.path.join(self.output_directory, 'bank_{0:03x}.asm'.format(bank))
         f = open(path, 'w', encoding="utf-8")
 
@@ -1040,7 +1056,7 @@ class ROM:
         f = open(path, 'w', encoding="utf-8")
 
         self.write_header(f)
-        f.write("MACRO jump_table\n\tdb low(\\1)\n\tdb high(\\1)\nENDM\n")
+        f.write("MACRO jump_address\n\tdb low(\\1)\n\tdb high(\\1)\nENDM\n")
         f.write('INCLUDE "hardware.inc"')
     
         character_maps = self.get_character_map_paths()
@@ -1048,8 +1064,13 @@ class ROM:
             for map in character_maps:
                 f.write('\nINCLUDE "{}"'.format(os.path.basename(map)))
             f.write('\nSETCHARMAP main')
+        empties = ""
         for bank in range(0, self.num_banks):
+            if(self.style["ignore_empty_banks"] and self.banks[bank].is_empty(self)): 
+                empties += '\nSECTION "ROM Bank ${0:03x}", ROMX[$4000], BANK[${0:03x}]'.format(bank)
+                continue
             f.write('\nINCLUDE "bank_{0:03x}.asm"'.format(bank))
+        f.write("\n\n;Empty Banks"+empties)
         f.close()
 
     def write_binary(self, basename, arguments, data):
@@ -1269,6 +1290,7 @@ parser.add_argument('--disable-halt-nops', help='Disable RGBDS\'s automatic inse
 parser.add_argument('--overwrite', help='Allow generating a disassembly into an already existing directory', action='store_true')
 parser.add_argument('--debug', help='Display debug output', action='store_true')
 parser.add_argument('--tiny', help='Emulate RGBLINK `-t` option (non-banked / "32k" ROMs)', action='store_true')
+parser.add_argument('--ignore-empty', help="Don't create files for banks with no data", action='store_true')
 args = parser.parse_args()
 
 debug = args.debug
@@ -1283,6 +1305,7 @@ style = {
     'ldh_a8': args.ldh_a8,
     'ld_c': args.ld_c,
     'disable_halt_nops': args.disable_halt_nops,
+    'ignore_empty_banks' : args.ignore_empty,
 }
 if __name__ == '__main__':
     
